@@ -130,7 +130,7 @@ def add_notion_task(task: str) -> bool:
     data = {
         "parent": {"database_id": NOTION_DATABASE_ID},
         "properties": {
-            "Name": {
+            "Nombre": {
                 "title": [{"text": {"content": task}}]
             }
         }
@@ -143,7 +143,7 @@ def get_notion_tasks() -> list[str]:
     result = notion_request("POST", f"/databases/{NOTION_DATABASE_ID}/query", {})
     tasks = []
     for page in result.get("results", []):
-        title_prop = page.get("properties", {}).get("Name", {}).get("title", [])
+        title_prop = page.get("properties", {}).get("Nombre", {}).get("title", [])
         if title_prop:
             tasks.append(title_prop[0]["text"]["content"])
     return tasks
