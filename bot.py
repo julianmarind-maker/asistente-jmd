@@ -89,6 +89,57 @@ Frases que indican guardar pendiente: "anota", "agrega pendiente", "guarda", "re
 Cuando detectes una de estas frases, usa la función add_notion_task con la tarea.
 También puedes listar los pendientes cuando te pregunte "¿qué tengo pendiente?" o "muéstrame mis pendientes".
 
+DESEMPEÑO FDV — COHORTE 9 (fecha: 2026-06-19):
+Canal: RGU prom C9=8.37 | Ausentismo=35.7% | 5 gerentes
+
+GERENTES (ranking | nombre | RGU_acum | RGU_C9 | aus% | sin_motivo | NPN60_act | NPN60_ref | delta60 | acción):
+1 | Luis Vasquez     | 10.82 | 12.27 | 16.7% | 0  | 12.9 | 18.7 | -5.8 | REFUERZO
+2 | Marcos Herrera   |  7.75 |  6.60 | 34.8% | 14 | 31.0 | 32.2 | -1.3 | CAMPO
+3 | Mayli Santamaria |  7.18 |  7.85 | 31.8% | 11 | 14.3 | 23.2 | -8.9 | REFUERZO
+4 | Katiuska Gonzalez|  6.22 |  9.07 | 35.0% |  3 | 17.5 | 19.5 | -1.9 | REFUERZO
+5 | Richard Ramirez  |  6.03 |  6.01 | 26.7% |  1 |  4.8 |  3.1 | +1.7 | CAMPO
+
+SUPERVISORES (ranking_canal | nombre | gerente | RGU_acum | RGU_C9 | aus% | sin_motivo | acción):
+ 1 | Luis Andres Mojica | Katiuska  | 13.29 | 19.31 |  0.0% |  0 | REFUERZO
+ 2 | Jose Perez         | Luis V.   | 12.24 | 13.70 |  0.0% |  3 | REFUERZO
+ 3 | Celibeth Gonzalez  | Luis V.   | 11.45 | 14.10 | 16.7% |  0 | CAMPO
+ 4 | Gaspar Guerrero    | Marcos    |  9.30 |  6.97 |  0.0% |  2 | REFUERZO
+ 5 | Jose Madrid        | Luis V.   |  8.78 |  9.00 | 16.7% |  1 | CAMPO
+ 6 | Lisbeth Rosas      | Mayli     |  8.14 |  9.29 |  0.0% |  2 | REFUERZO
+ 7 | Cristian Espinosa  | Marcos    |  8.12 |  4.70 |  0.0% |  0 | CAMPO
+ 8 | Daniel Garzon      | Marcos    |  7.38 |  5.14 | 20.0% |  0 | CAMPO
+ 9 | Joseph Guerra      | Mayli     |  7.32 |  8.49 | 20.8% | 13 | CAMPO
+10 | Kathia Camarena    | Richard   |  7.19 |  6.67 | 29.2% | 14 | CAMPO
+11 | Alejandra Perez    | Marcos    |  7.00 |  7.08 | 60.0% | 11 | REFUERZO
+12 | Maria Gonzalez     | Marcos    |  6.95 |  9.09 | 35.5% | 39 | CAMPO URGENTE
+13 | Juan Contreras     | Katiuska  |  6.10 |  8.04 |  0.0% |  0 | REFUERZO
+14 | Joshua Rivera      | Mayli     |  6.08 |  5.79 | 45.0% | 28 | CAMPO URGENTE
+15 | Dario White        | Katiuska  |  5.47 |  6.17 | 40.0% |  3 | REFUERZO
+16 | Edwin Ortiz        | Richard   |  4.86 |  5.34 | 16.7% |  1 | CAMPO
+17 | Jonathan Delgado   | Katiuska  |  4.47 |  5.89 | 36.4% |  5 | CAMPO
+18 | Carlos Mojica      | Katiuska  |  4.43 |  5.95 | 25.0% |  3 | CAMPO
+
+VENDEDORES TOP (ranking_canal | nombre | supervisor | gerente | score_coaching | skills débiles):
+ 1 | Laureano Vega      | J.Guerra   | Mayli    | 78.6 | exploración, presentación, cierre
+ 2 | Isaí Fuertes       | J.Guerra   | Mayli    | 71.4 | exploración, presentación, objeciones, cierre
+ 3 | Alvis Dominguez    | J.Perez    | Luis V.  | 71.4 | exploración, presentación, disciplina
+ 4 | Alberto Quintero   | D.White    | Katiuska | 57.1 | todos en 50
+ 5 | Gustavo Quintero   | J.Guerra   | Mayli    | 57.1 | exploración, presentación, objeciones, cierre
+ 6 | Carolina Alvarado  | A.Perez    | Marcos   | 57.1 | exploración, presentación, objeciones, cierre
+ 7 | Royberto Spencer   | J.Rivera   | Mayli    | 50.0 | disciplina
+ 8 | Ydania Amaranto    | J.Perez    | Luis V.  | 50.0 | exploración
+ 9 | Analiz Anderson    | L.Mojica   | Katiuska | 50.0 | todos en 50
+10 | Victor Rodriguez   | G.Guerrero | Marcos   | 50.0 | todos en 50
+11 | Angel Serrano      | J.Rivera   | Mayli    | 50.0 | presentación
+12 | Manuel Rodriguez   | J.Madrid   | Luis V.  | 35.7 | objeciones
+13 | Juan Soriano       | J.Perez    | Luis V.  | 35.7 | exploración, presentación, objeciones, cierre
+14 | Aramis Rivera      | G.Guerrero | Marcos   | 35.7 | disciplina
+15 | Amada Arauz        | M.Gonzalez | Marcos   | 28.6 | presentación, objeciones, disciplina
+16 | Victor Saavedra    | J.Madrid   | Luis V.  | 21.4 | presentación, objeciones, cierre, disciplina
+17 | Eric Herrera       | D.White    | Katiuska | 21.4 | apertura, presentación, cierre, disciplina
+18 | Jorge Gonzalez     | J.Rivera   | Mayli    |  0.0 | todos en 0
+19 | Evisabel Vanegas   | J.Madrid   | Luis V.  |  0.0 | todos en 0
+
 TU ROL:
 - Cuando Julián pregunte disponibilidad u horarios, consulta la agenda arriba y responde con precisión
 - Mentor riguroso, NO asistente complaciente
