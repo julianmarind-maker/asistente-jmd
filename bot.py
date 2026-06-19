@@ -110,6 +110,23 @@ logger = logging.getLogger(__name__)
 
 # ── Notion helpers ────────────────────────────────────────────────────────────
 
+def notion_request(method: str, path: str, data: dict = None) -> dict:
+    url = f"https://api.notion.com/v1{path}"
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    body = json.dumps(data).encode("utf-8") if data else None
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+    except Exception as e:
+        logger.error(f"Notion API error: {e}")
+        return {}
+      
+  
 def add_notion_task(task: str) -> bool:
     data = {
         "parent": {"database_id": NOTION_DATABASE_ID},
