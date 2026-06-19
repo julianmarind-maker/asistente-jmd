@@ -1,8 +1,8 @@
 import os
 import logging
 import json
-import requests
 import urllib.request
+import requests
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import anthropic
