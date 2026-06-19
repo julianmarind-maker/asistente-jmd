@@ -99,25 +99,25 @@ GERENTES (ranking | nombre | RGU_acum | RGU_C9 | aus% | sin_motivo | NPN60_act |
 4 | Katiuska Gonzalez|  6.22 |  9.07 | 35.0% |  3 | 17.5 | 19.5 | -1.9 | REFUERZO
 5 | Richard Ramirez  |  6.03 |  6.01 | 26.7% |  1 |  4.8 |  3.1 | +1.7 | CAMPO
 
-SUPERVISORES (ranking_canal | nombre | gerente | RGU_acum | RGU_C9 | aus% | sin_motivo | acción):
- 1 | Luis Andres Mojica | Katiuska  | 13.29 | 19.31 |  0.0% |  0 | REFUERZO
- 2 | Jose Perez         | Luis V.   | 12.24 | 13.70 |  0.0% |  3 | REFUERZO
- 3 | Celibeth Gonzalez  | Luis V.   | 11.45 | 14.10 | 16.7% |  0 | CAMPO
- 4 | Gaspar Guerrero    | Marcos    |  9.30 |  6.97 |  0.0% |  2 | REFUERZO
- 5 | Jose Madrid        | Luis V.   |  8.78 |  9.00 | 16.7% |  1 | CAMPO
- 6 | Lisbeth Rosas      | Mayli     |  8.14 |  9.29 |  0.0% |  2 | REFUERZO
- 7 | Cristian Espinosa  | Marcos    |  8.12 |  4.70 |  0.0% |  0 | CAMPO
- 8 | Daniel Garzon      | Marcos    |  7.38 |  5.14 | 20.0% |  0 | CAMPO
- 9 | Joseph Guerra      | Mayli     |  7.32 |  8.49 | 20.8% | 13 | CAMPO
-10 | Kathia Camarena    | Richard   |  7.19 |  6.67 | 29.2% | 14 | CAMPO
-11 | Alejandra Perez    | Marcos    |  7.00 |  7.08 | 60.0% | 11 | REFUERZO
-12 | Maria Gonzalez     | Marcos    |  6.95 |  9.09 | 35.5% | 39 | CAMPO URGENTE
-13 | Juan Contreras     | Katiuska  |  6.10 |  8.04 |  0.0% |  0 | REFUERZO
-14 | Joshua Rivera      | Mayli     |  6.08 |  5.79 | 45.0% | 28 | CAMPO URGENTE
-15 | Dario White        | Katiuska  |  5.47 |  6.17 | 40.0% |  3 | REFUERZO
-16 | Edwin Ortiz        | Richard   |  4.86 |  5.34 | 16.7% |  1 | CAMPO
-17 | Jonathan Delgado   | Katiuska  |  4.47 |  5.89 | 36.4% |  5 | CAMPO
-18 | Carlos Mojica      | Katiuska  |  4.43 |  5.95 | 25.0% |  3 | CAMPO
+SUPERVISORES (ranking_canal | nombre | gerente | RGU_acum | RGU_C9 | quartil C7→C8→C9 | aus% | sin_motivo | acción):
+ 1 | Luis Andres Mojica | Katiuska  | 13.29 | 19.31 | Q4→Q1→Q1 |  0.0% |  0 | REFUERZO
+ 2 | Jose Perez         | Luis V.   | 12.24 | 13.70 | Q1→Q2→Q2 |  0.0% |  3 | REFUERZO
+ 3 | Celibeth Gonzalez  | Luis V.   | 11.45 | 14.10 | Q3→Q1→Q1 | 16.7% |  0 | CAMPO
+ 4 | Gaspar Guerrero    | Marcos    |  9.30 |  6.97 | Q2→Q2→Q2 |  0.0% |  2 | REFUERZO
+ 5 | Jose Madrid        | Luis V.   |  8.78 |  9.00 | Q2→Q3→Q3 | 16.7% |  1 | CAMPO
+ 6 | Lisbeth Rosas      | Mayli     |  8.14 |  9.29 | Q2→Q1→Q1 |  0.0% |  2 | REFUERZO
+ 7 | Cristian Espinosa  | Marcos    |  8.12 |  4.70 | Q1→Q4→Q4 |  0.0% |  0 | CAMPO
+ 8 | Daniel Garzon      | Marcos    |  7.38 |  5.14 | Q4→Q1→Q3 | 20.0% |  0 | CAMPO
+ 9 | Joseph Guerra      | Mayli     |  7.32 |  8.49 | Q1→Q3→Q2 | 20.8% | 13 | CAMPO
+10 | Kathia Camarena    | Richard   |  7.19 |  6.67 | Q1→Q3→Q1 | 29.2% | 14 | CAMPO
+11 | Alejandra Perez    | Marcos    |  7.00 |  7.08 | Q1→Q3→Q1 | 60.0% | 11 | REFUERZO
+12 | Maria Gonzalez     | Marcos    |  6.95 |  9.09 | Q3→Q1→Q1 | 35.5% | 39 | CAMPO URGENTE
+13 | Juan Contreras     | Katiuska  |  6.10 |  8.04 | Q1→Q1→Q1 |  0.0% |  0 | REFUERZO
+14 | Joshua Rivera      | Mayli     |  6.08 |  5.79 | Q3→Q2→Q3 | 45.0% | 28 | CAMPO URGENTE
+15 | Dario White        | Katiuska  |  5.47 |  6.17 | Q3→Q2→Q2 | 40.0% |  3 | REFUERZO
+16 | Edwin Ortiz        | Richard   |  4.86 |  5.34 | Q3→Q1→Q3 | 16.7% |  1 | CAMPO
+17 | Jonathan Delgado   | Katiuska  |  4.47 |  5.89 | Q1→Q4→Q4 | 36.4% |  5 | CAMPO
+18 | Carlos Mojica      | Katiuska  |  4.43 |  5.95 | Q2→Q3→Q3 | 25.0% |  3 | CAMPO
 
 VENDEDORES TOP (ranking_canal | nombre | supervisor | gerente | score_coaching | skills débiles):
  1 | Laureano Vega      | J.Guerra   | Mayli    | 78.6 | exploración, presentación, cierre
