@@ -1,7 +1,6 @@
 import os
 import logging
 import json
-import urllib.request
 import requests
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -118,27 +117,13 @@ def notion_request(method: str, path: str, data: dict = None) -> dict:
         "Content-Type": "application/json",
         "Notion-Version": "2022-06-28"
     }
-    body = json.dumps(data).encode("utf-8") if data else None
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read())
+        resp = requests.request(method, url, headers=headers, json=data, timeout=10)
+        logger.info(f"Notion response: {resp.status_code} {resp.text[:200]}")
+        return resp.json()
     except Exception as e:
         logger.error(f"Notion API error: {e}")
         return {}
-      
-  
-def add_notion_task(task: str) -> bool:
-    data = {
-        "parent": {"database_id": NOTION_DATABASE_ID},
-        "properties": {
-            "Name": {
-                "title": [{"text": {"content": task}}]
-            }
-        }
-    }
-    result = notion_request("POST", "/pages", data)
-    return bool(result.get("id"))
 
 
 def add_notion_task(task: str) -> bool:
