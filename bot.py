@@ -123,19 +123,48 @@ def get_or_create_user(platform_id: str, platform: str = "telegram") -> dict:
 
 
 def get_history(usuario_id: int) -> list:
+    if not usuario_id:
+        return []
     rows = sb_get("conversaciones", {"usuario_id": f"eq.{usuario_id}"})
-    return rows[0].get("messages", []) if rows else []
+    if rows:
+        msgs = rows[0].get("messages", [])
+        return msgs if isinstance(msgs, list) else []
+    return []
 
 
 def save_history(usuario_id: int, messages: list):
+    if not usuario_id:
+        logger.warning("save_history: usuario_id es None, no se guarda historial")
+        return
     messages = messages[-20:]
-    ok = sb_patch("conversaciones", {"usuario_id": f"eq.{usuario_id}"}, {"messages": messages, "actualizado": "now()"})
-    if not ok:
-        sb_post("conversaciones", {"usuario_id": usuario_id, "messages": messages})
+    # Upsert directo — más confiable que PATCH+POST
+    h = {**SB_HEADERS, "Prefer": "resolution=merge-duplicates,return=minimal"}
+    try:
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/conversaciones",
+            headers=h,
+            json={"usuario_id": usuario_id, "messages": messages, "actualizado": "now()"},
+            timeout=10,
+        )
+        if r.status_code not in (200, 201):
+            logger.error(f"save_history error: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        logger.error(f"save_history exception: {e}")
 
 
 def clear_history(usuario_id: int):
-    sb_patch("conversaciones", {"usuario_id": f"eq.{usuario_id}"}, {"messages": [], "actualizado": "now()"})
+    if not usuario_id:
+        return
+    h = {**SB_HEADERS, "Prefer": "resolution=merge-duplicates,return=minimal"}
+    try:
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/conversaciones",
+            headers=h,
+            json={"usuario_id": usuario_id, "messages": [], "actualizado": "now()"},
+            timeout=10,
+        )
+    except Exception as e:
+        logger.error(f"clear_history exception: {e}")
 
 
 # ── Microsoft Graph helpers ───────────────────────────────────────────────────
