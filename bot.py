@@ -41,6 +41,15 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_ADMIN = """Eres Dona, la asistente personal de Julián Marín, Director de Venta Directa en CWP Panamá.
 
+PERSONALIDAD:
+Eres como Donna Paulsen de Suits: directa, inteligente, con humor seco y siempre un paso adelante.
+- Nunca eres servil ni dices "claro que sí" a todo — tienes criterio propio y lo usas.
+- Eres leal a Julián pero lo corriges cuando algo no tiene sentido.
+- Vas al grano. No das rodeos ni rellenas con frases vacías.
+- Puedes usar humor cuando el contexto lo permite, pero sin pasarte.
+- Si algo es urgente o importante, lo dices con peso — no lo suavizas innecesariamente.
+- Hablas como una persona real, no como un bot.
+
 CONTEXTO PERSONAL:
 - Tiene TDAH, toma medicamento a las 7am. Pico de foco en la mañana, baja a las 4-5pm.
 - Llega a casa 6:30pm, duerme 10-10:30pm. Zona horaria: GMT-5 (Panamá)
@@ -56,16 +65,26 @@ DISPONIBLE PARA REUNIONES: Lun 10:30–12:00 | Mar 08:00–12:00 | Mié 14:00–
 
 PENDIENTES: Usa add_task / list_tasks para manejar Notion.
 DATOS FDV: Usa query_* para responder sobre métricas del equipo. Nunca inventes cifras.
+- Si preguntan por UNA PERSONA específica (ej: "cómo va Juan Pérez"), usa SIEMPRE query_vendedores con el parámetro nombre. No busques primero en supervisores.
+- Si no aparece en vendedores, entonces busca en supervisores o gerentes.
 CALENDARIO: Usa block_agenda_slot SOLO cuando Julián confirme explícitamente bloquear un espacio.
 
 ROL: Mentor riguroso, NO complaciente. Directo, conciso, para móvil. Siempre español."""
 
 SYSTEM_GERENTE = """Eres Dona, asistente de gestión para el equipo de Venta Directa de CWP Panamá.
 
+PERSONALIDAD:
+Eres como Donna Paulsen de Suits: directa, inteligente, con humor seco y siempre un paso adelante.
+- No eres servil. Tienes criterio y lo usas.
+- Vas al grano — sin rodeos ni frases de relleno.
+- Puedes usar humor cuando aplica, pero siempre profesional.
+- Hablas como una persona real, no como un bot corporativo.
+
 El usuario es un GERENTE DE TERRITORIO. Tus reglas:
 - Responde SOLO sobre temas laborales: desempeño, métricas FDV, su equipo, coaching.
 - NUNCA respondas sobre finanzas personales, agenda personal, ni temas privados de Julián.
 - Para consultas de datos, usa las herramientas query_*. Nunca inventes cifras.
+- Si preguntan por UNA PERSONA específica, usa SIEMPRE query_vendedores con el parámetro nombre primero. Si no aparece, busca en supervisores.
 - Puedes dar recomendaciones de gestión basadas en los datos (quartiles, ausentismo, RGU).
 - Si el gerente pide una reunión con Julián, usa notify_julian para avisarle.
 - El gerente solo puede ver datos de SU equipo (sus supervisores y vendedores).
@@ -284,20 +303,30 @@ def fdv_supervisores(gerente: str = None) -> str:
     return "\n".join(lines)
 
 
-def fdv_vendedores(supervisor: str = None, gerente: str = None) -> str:
+def fdv_vendedores(supervisor: str = None, gerente: str = None, nombre: str = None) -> str:
     params = {"order": "ranking_canal"}
-    if supervisor:
+    if nombre:
+        # Buscar por cada palabra del nombre (cubre orden invertido)
+        palabras = [p for p in nombre.strip().split() if len(p) > 2]
+        if palabras:
+            filtros = ",".join(f"nombre.ilike.*{p}*" for p in palabras)
+            params["or"] = f"({filtros})"
+        else:
+            params["nombre"] = f"ilike.*{nombre}*"
+    elif supervisor:
         params["supervisor"] = f"ilike.*{supervisor}*"
     elif gerente:
         params["gerente"] = f"ilike.*{gerente}*"
     rows = sb_get("vendedores", params)
     if not rows:
         return "No hay datos de vendedores."
-    label = supervisor or gerente or "canal completo"
+    label = nombre or supervisor or gerente or "canal completo"
     lines = [f"Vendedores ({label}):"]
     for r in rows:
         q = f"{r.get('quartil_c7','?')}→{r.get('quartil_c8','?')}→{r.get('quartil_c9','?')}"
-        lines.append(f"#{r['ranking_canal']} {r['nombre']} | RGU:{r['rgu_actual']} | Q:{q} | {r['supervisor']}")
+        sc = f" | SC:{r['sc_pct']}%" if r.get('sc_pct') is not None else ""
+        aus = f" | Aus:{r.get('aus_dias_ultimas3',0)}d({r.get('aus_sin_motivo_ultimas3',0)} sin motivo)"
+        lines.append(f"#{r['ranking_canal']} {r['nombre']} | RGU:{r['rgu_actual']} | Q:{q}{sc}{aus} | {r['supervisor']}")
     return "\n".join(lines)
 
 
@@ -352,10 +381,11 @@ _TOOL_QUERY_SUPERVISORES = {
 }
 _TOOL_QUERY_VENDEDORES = {
     "name": "query_vendedores",
-    "description": "Vendedores con métricas. Filtra por supervisor o gerente.",
+    "description": "Vendedores con métricas (RGU, cuartil, scorecard, ausentismo). Filtra por nombre de vendedor, supervisor o gerente.",
     "input_schema": {"type": "object", "properties": {
-        "supervisor": {"type": "string", "description": "Nombre parcial del supervisor (opcional)."},
-        "gerente":    {"type": "string", "description": "Nombre parcial del gerente (opcional)."},
+        "nombre":     {"type": "string", "description": "Nombre parcial del vendedor (para buscar un vendedor específico)."},
+        "supervisor": {"type": "string", "description": "Nombre parcial del supervisor (para ver su equipo)."},
+        "gerente":    {"type": "string", "description": "Nombre parcial del gerente (para ver todos sus vendedores)."},
     }},
 }
 _TOOL_NOTIFY_JULIAN = {
@@ -429,11 +459,12 @@ def handle_tool_call(name: str, inp: dict, usuario: dict) -> str:
     if name == "query_vendedores":
         sup     = inp.get("supervisor")
         gerente = inp.get("gerente")
+        nombre  = inp.get("nombre")
         # Gerentes solo ven su equipo
         if rol == "gerente" and gerente_ref:
             gerente = gerente_ref
             sup = None
-        return fdv_vendedores(supervisor=sup, gerente=gerente)
+        return fdv_vendedores(supervisor=sup, gerente=gerente, nombre=nombre)
 
     if name == "block_agenda_slot":
         if rol != "admin":
