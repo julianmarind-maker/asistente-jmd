@@ -1,358 +1,532 @@
+"""
+Dona v2 — Bot Telegram con Supabase + Microsoft Graph (calendario)
+Arquitectura WhatsApp-ready: lógica separada del transporte, historial en DB.
+
+Variables de entorno requeridas (Railway):
+  TELEGRAM_TOKEN, ANTHROPIC_API_KEY, NOTION_TOKEN, NOTION_DATABASE_ID
+  SUPABASE_URL, SUPABASE_ANON_KEY, ALLOWED_USER_ID
+
+Variables opcionales (habilitan calendario — agregar en Fase B):
+  MS_CLIENT_ID, MS_CLIENT_SECRET, MS_REFRESH_TOKEN
+"""
+
 import os
-import logging
 import json
+import logging
 import requests
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import anthropic
 
-# ── Config (via environment variables en Railway) ─────────────────────────────
-TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-NOTION_TOKEN      = os.environ["NOTION_TOKEN"]
+# ── Config ────────────────────────────────────────────────────────────────────
+TELEGRAM_TOKEN     = os.environ["TELEGRAM_TOKEN"]
+ANTHROPIC_API_KEY  = os.environ["ANTHROPIC_API_KEY"]
+NOTION_TOKEN       = os.environ["NOTION_TOKEN"]
 NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
-ALLOWED_USER_ID   = int(os.environ.get("ALLOWED_USER_ID", "0"))
+SUPABASE_URL       = os.environ["SUPABASE_URL"]
+SUPABASE_KEY       = os.environ["SUPABASE_ANON_KEY"]
+ADMIN_TELEGRAM_ID  = int(os.environ.get("ALLOWED_USER_ID", "0"))
+
+# Microsoft Graph — opcional, se activa solo si están las 3 vars
+MS_CLIENT_ID     = os.environ.get("MS_CLIENT_ID", "")
+MS_CLIENT_SECRET = os.environ.get("MS_CLIENT_SECRET", "")
+MS_REFRESH_TOKEN = os.environ.get("MS_REFRESH_TOKEN", "")
+CALENDAR_ENABLED = bool(MS_CLIENT_ID and MS_CLIENT_SECRET and MS_REFRESH_TOKEN)
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """Eres el asistente personal de Julián Marín, Director de Venta Directa en CWP Panamá.
+# ── System Prompts ────────────────────────────────────────────────────────────
+
+SYSTEM_ADMIN = """Eres Dona, la asistente personal de Julián Marín, Director de Venta Directa en CWP Panamá.
 
 CONTEXTO PERSONAL:
-- Tiene TDAH, toma medicamento estimulante a las 7am
-- Pico de foco en la mañana; medicamento baja a las 4-5pm
-- Llega a casa 6:30pm con rebote de ansiedad y cansancio mental
-- Duerme 10-10:30pm. Zona horaria: GMT-5 (Panamá)
+- Tiene TDAH, toma medicamento a las 7am. Pico de foco en la mañana, baja a las 4-5pm.
+- Llega a casa 6:30pm, duerme 10-10:30pm. Zona horaria: GMT-5 (Panamá)
 
-AGENDA SEMANAL FIJA (bloques inamovibles):
-Todos los días:
-  07:00         Despertar + medicamento + desayuno
-  12:00–14:00   Almuerzo en casa + ejercicio 30 min
-  18:30         Llegada a casa
-  22:00–22:30   Dormir
+AGENDA SEMANAL (bloques inamovibles):
+Todos los días: 07:00 despertar | 12:00–14:00 almuerzo+ejercicio | 18:30 llegada | 22:00 dormir
+LUNES: 08:00 Comité semanal | 09:30 Pre ExCo VP | 10:30–12:00 LIBRE | 14:00 1-1 Katiuska | 15:00 1-1 Marcos | 16:00 1-1 Richard | 17:00–18:00 VP protegido
+MARTES: 08:00–12:00 Deep work | 14:00 1-1 Luis V. | 15:00 1-1 Mayli | 16:00–18:00 Dinamo/Cellca admin
+MIÉRCOLES: 08:00–12:00 Deep work | 14:00–16:00 Admin | 16:30 Dinamo campo | 17:00–18:00 VP protegido | 19:30 Inglés
+JUEVES: 08:00–10:00 Deep work | 10:30–12:00 Deep work (mejor bloque, protegido) | 14:00 Sup.Katiuska | 15:00 Sup.Marcos | 16:00 Sup.Richard | 17:00 V&G campo
+VIERNES: 08:00–10:00 Salesland campo | 10:00–12:00 LIBRE | 14:00 Landing Revenue | 16:00 Review semanal | 17:00–18:00 LIBRE
+DISPONIBLE PARA REUNIONES: Lun 10:30–12:00 | Mar 08:00–12:00 | Mié 14:00–16:00 | Jue 08:00–10:00 | Vie 10:00–12:00 o 17:00–18:00
 
-LUNES (día más cargado, sin trabajo profundo real):
-  08:00–09:00   Comité semanal
-  09:30–10:30   Pre ExCo VP
-  10:30–12:00   LIBRE (buffer/admin ligero)
-  14:00–15:00   1-1 Katiuska
-  15:00–16:00   1-1 Marcos
-  16:00–17:00   1-1 Richard
-  17:00–18:00   Bloque autónomo VP (protegido)
+PENDIENTES: Usa add_task / list_tasks para manejar Notion.
+DATOS FDV: Usa query_* para responder sobre métricas del equipo. Nunca inventes cifras.
+CALENDARIO: Usa block_agenda_slot SOLO cuando Julián confirme explícitamente bloquear un espacio.
 
-MARTES (buena tarde para trabajo profundo cuando no hay campo):
-  08:00–12:00   Trabajo profundo
-  14:00–15:00   1-1 Luis V.
-  15:00–16:00   1-1 Mayli
-  16:00–18:00   Dinamo admin (Sem A quincenal) / Cellca admin (Sem B quincenal)
+ROL: Mentor riguroso, NO complaciente. Directo, conciso, para móvil. Siempre español."""
 
-MIÉRCOLES:
-  08:00–12:00   Trabajo profundo
-  14:00–16:00   Admin / reuniones varias
-  16:30–18:00   Dinamo campo (semanal)
-  17:00–18:00   Bloque autónomo VP (protegido)
-  19:30–21:00   Clase de inglés
+SYSTEM_GERENTE = """Eres Dona, asistente de gestión para el equipo de Venta Directa de CWP Panamá.
 
-JUEVES (mejor día para deep work):
-  08:00–10:00   Trabajo profundo
-  10:30–12:00   Mejor bloque deep work de la semana (protegido)
-  14:00–15:00   Supervisores Katiuska
-  15:00–16:00   Supervisores Marcos
-  16:00–17:00   Supervisores Richard
-  17:00–18:00   V&G campo (semanal)
+El usuario es un GERENTE DE TERRITORIO. Tus reglas:
+- Responde SOLO sobre temas laborales: desempeño, métricas FDV, su equipo, coaching.
+- NUNCA respondas sobre finanzas personales, agenda personal, ni temas privados de Julián.
+- Para consultas de datos, usa las herramientas query_*. Nunca inventes cifras.
+- Puedes dar recomendaciones de gestión basadas en los datos (quartiles, ausentismo, RGU).
+- Si el gerente pide una reunión con Julián, usa notify_julian para avisarle.
+- El gerente solo puede ver datos de SU equipo (sus supervisores y vendedores).
+  Para ranking nacional, muestra su posición pero no datos privados de otros gerentes.
 
-VIERNES:
-  08:00–10:00   Salesland campo (semanal)
-  10:00–12:00   LIBRE (trabajo profundo o admin)
-  14:00–15:00   Landing Revenue
-  16:00–17:00   Review semanal / planificación siguiente semana
-  17:00–18:00   LIBRE
+Directo, conciso, profesional. Siempre en español."""
 
-BLOQUES DISPONIBLES PARA REUNIONES NUEVAS:
-- Lunes 10:30–12:00
-- Martes 08:00–12:00 (sacrifica deep work, solo si es necesario)
-- Miércoles 14:00–16:00
-- Jueves 08:00–10:00
-- Viernes 10:00–12:00 o 17:00–18:00
+# ── Supabase helpers ──────────────────────────────────────────────────────────
 
-EQUIPO DIRECTO (gerentes de territorio, de mayor a menor criticidad):
-1. Katiuska | 2. Marcos | 3. Richard | 4. Luis V. | 5. Mayli
+SB_HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+}
 
-CONTRATISTAS FDV:
-- Dinamo: martes tarde admin (quincenal Sem A) + campo semanal miércoles 4:30pm
-- V&G: jueves campo semanal 5pm
-- Salesland: viernes campo semanal 8am
-- Cellca: martes quincenal Sem B (solo admin, menor criticidad)
 
-GESTIÓN DE PENDIENTES EN NOTION:
-Puedes guardar tareas pendientes en Notion cuando Julián te lo pida.
-Frases que indican guardar pendiente: "anota", "agrega pendiente", "guarda", "recuérdame", "pendiente:", "tarea:"
-Cuando detectes una de estas frases, usa la función add_notion_task con la tarea.
-También puedes listar los pendientes cuando te pregunte "¿qué tengo pendiente?" o "muéstrame mis pendientes".
+def sb_get(table: str, params: dict = None) -> list:
+    try:
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}", headers=SB_HEADERS, params=params, timeout=10)
+        return r.json() if r.status_code == 200 else []
+    except Exception as e:
+        logger.error(f"Supabase GET {table}: {e}")
+        return []
 
-DESEMPEÑO FDV — COHORTE 9 (fecha: 2026-06-19):
-Canal: RGU prom C9=8.37 | Ausentismo=35.7% | 5 gerentes
 
-GERENTES (ranking | nombre | RGU_acum | RGU_C9 | aus% | sin_motivo | NPN60_act | NPN60_ref | delta60 | acción):
-1 | Luis Vasquez     | 10.82 | 12.27 | 16.7% | 0  | 12.9 | 18.7 | -5.8 | REFUERZO
-2 | Marcos Herrera   |  7.75 |  6.60 | 34.8% | 14 | 31.0 | 32.2 | -1.3 | CAMPO
-3 | Mayli Santamaria |  7.18 |  7.85 | 31.8% | 11 | 14.3 | 23.2 | -8.9 | REFUERZO
-4 | Katiuska Gonzalez|  6.22 |  9.07 | 35.0% |  3 | 17.5 | 19.5 | -1.9 | REFUERZO
-5 | Richard Ramirez  |  6.03 |  6.01 | 26.7% |  1 |  4.8 |  3.1 | +1.7 | CAMPO
+def sb_post(table: str, data, upsert: bool = False) -> list | None:
+    h = {**SB_HEADERS, "Prefer": "resolution=merge-duplicates,return=representation"}
+    try:
+        r = requests.post(f"{SUPABASE_URL}/rest/v1/{table}", headers=h, json=data, timeout=10)
+        return r.json() if r.status_code in (200, 201) else None
+    except Exception as e:
+        logger.error(f"Supabase POST {table}: {e}")
+        return None
 
-SUPERVISORES (ranking_canal | nombre | gerente | RGU_acum | RGU_C9 | quartil C7→C8→C9 | aus% | sin_motivo | acción):
- 1 | Luis Andres Mojica | Katiuska  | 13.29 | 19.31 | Q4→Q1→Q1 |  0.0% |  0 | REFUERZO
- 2 | Jose Perez         | Luis V.   | 12.24 | 13.70 | Q1→Q2→Q2 |  0.0% |  3 | REFUERZO
- 3 | Celibeth Gonzalez  | Luis V.   | 11.45 | 14.10 | Q3→Q1→Q1 | 16.7% |  0 | CAMPO
- 4 | Gaspar Guerrero    | Marcos    |  9.30 |  6.97 | Q2→Q2→Q2 |  0.0% |  2 | REFUERZO
- 5 | Jose Madrid        | Luis V.   |  8.78 |  9.00 | Q2→Q3→Q3 | 16.7% |  1 | CAMPO
- 6 | Lisbeth Rosas      | Mayli     |  8.14 |  9.29 | Q2→Q1→Q1 |  0.0% |  2 | REFUERZO
- 7 | Cristian Espinosa  | Marcos    |  8.12 |  4.70 | Q1→Q4→Q4 |  0.0% |  0 | CAMPO
- 8 | Daniel Garzon      | Marcos    |  7.38 |  5.14 | Q4→Q1→Q3 | 20.0% |  0 | CAMPO
- 9 | Joseph Guerra      | Mayli     |  7.32 |  8.49 | Q1→Q3→Q2 | 20.8% | 13 | CAMPO
-10 | Kathia Camarena    | Richard   |  7.19 |  6.67 | Q1→Q3→Q1 | 29.2% | 14 | CAMPO
-11 | Alejandra Perez    | Marcos    |  7.00 |  7.08 | Q1→Q3→Q1 | 60.0% | 11 | REFUERZO
-12 | Maria Gonzalez     | Marcos    |  6.95 |  9.09 | Q3→Q1→Q1 | 35.5% | 39 | CAMPO URGENTE
-13 | Juan Contreras     | Katiuska  |  6.10 |  8.04 | Q1→Q1→Q1 |  0.0% |  0 | REFUERZO
-14 | Joshua Rivera      | Mayli     |  6.08 |  5.79 | Q3→Q2→Q3 | 45.0% | 28 | CAMPO URGENTE
-15 | Dario White        | Katiuska  |  5.47 |  6.17 | Q3→Q2→Q2 | 40.0% |  3 | REFUERZO
-16 | Edwin Ortiz        | Richard   |  4.86 |  5.34 | Q3→Q1→Q3 | 16.7% |  1 | CAMPO
-17 | Jonathan Delgado   | Katiuska  |  4.47 |  5.89 | Q1→Q4→Q4 | 36.4% |  5 | CAMPO
-18 | Carlos Mojica      | Katiuska  |  4.43 |  5.95 | Q2→Q3→Q3 | 25.0% |  3 | CAMPO
 
-VENDEDORES TOP (ranking_canal | nombre | supervisor | gerente | score_coaching | skills débiles):
- 1 | Laureano Vega      | J.Guerra   | Mayli    | 78.6 | exploración, presentación, cierre
- 2 | Isaí Fuertes       | J.Guerra   | Mayli    | 71.4 | exploración, presentación, objeciones, cierre
- 3 | Alvis Dominguez    | J.Perez    | Luis V.  | 71.4 | exploración, presentación, disciplina
- 4 | Alberto Quintero   | D.White    | Katiuska | 57.1 | todos en 50
- 5 | Gustavo Quintero   | J.Guerra   | Mayli    | 57.1 | exploración, presentación, objeciones, cierre
- 6 | Carolina Alvarado  | A.Perez    | Marcos   | 57.1 | exploración, presentación, objeciones, cierre
- 7 | Royberto Spencer   | J.Rivera   | Mayli    | 50.0 | disciplina
- 8 | Ydania Amaranto    | J.Perez    | Luis V.  | 50.0 | exploración
- 9 | Analiz Anderson    | L.Mojica   | Katiuska | 50.0 | todos en 50
-10 | Victor Rodriguez   | G.Guerrero | Marcos   | 50.0 | todos en 50
-11 | Angel Serrano      | J.Rivera   | Mayli    | 50.0 | presentación
-12 | Manuel Rodriguez   | J.Madrid   | Luis V.  | 35.7 | objeciones
-13 | Juan Soriano       | J.Perez    | Luis V.  | 35.7 | exploración, presentación, objeciones, cierre
-14 | Aramis Rivera      | G.Guerrero | Marcos   | 35.7 | disciplina
-15 | Amada Arauz        | M.Gonzalez | Marcos   | 28.6 | presentación, objeciones, disciplina
-16 | Victor Saavedra    | J.Madrid   | Luis V.  | 21.4 | presentación, objeciones, cierre, disciplina
-17 | Eric Herrera       | D.White    | Katiuska | 21.4 | apertura, presentación, cierre, disciplina
-18 | Jorge Gonzalez     | J.Rivera   | Mayli    |  0.0 | todos en 0
-19 | Evisabel Vanegas   | J.Madrid   | Luis V.  |  0.0 | todos en 0
+def sb_patch(table: str, params: dict, data: dict) -> bool:
+    h = {**SB_HEADERS, "Prefer": "return=minimal"}
+    try:
+        r = requests.patch(f"{SUPABASE_URL}/rest/v1/{table}", headers=h, params=params, json=data, timeout=10)
+        return r.status_code in (200, 204)
+    except Exception as e:
+        logger.error(f"Supabase PATCH {table}: {e}")
+        return False
 
-TU ROL:
-- Cuando Julián pregunte disponibilidad u horarios, consulta la agenda arriba y responde con precisión
-- Mentor riguroso, NO asistente complaciente
-- Directo, claro, conversacional — nunca robótico
-- Ayudas a priorizar, preparar reuniones, redactar correos, tomar decisiones
-- Si algo no tiene sentido o hay un error, lo dices
-- Respuestas concisas optimizadas para leer en móvil
-- Siempre en español"""
 
-# Historial de conversación por usuario (en memoria)
-histories: dict[int, list] = {}
+# ── User & history ────────────────────────────────────────────────────────────
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+def get_or_create_user(platform_id: str, platform: str = "telegram") -> dict:
+    rows = sb_get("usuarios_dona", {"platform": f"eq.{platform}", "platform_id": f"eq.{platform_id}"})
+    if rows:
+        return rows[0]
+    rol = "admin" if platform == "telegram" and str(platform_id) == str(ADMIN_TELEGRAM_ID) else "viewer"
+    result = sb_post("usuarios_dona", {"platform": platform, "platform_id": str(platform_id), "rol": rol})
+    return result[0] if isinstance(result, list) and result else {"platform_id": platform_id, "rol": rol, "id": None}
+
+
+def get_history(usuario_id: int) -> list:
+    rows = sb_get("conversaciones", {"usuario_id": f"eq.{usuario_id}"})
+    return rows[0].get("messages", []) if rows else []
+
+
+def save_history(usuario_id: int, messages: list):
+    messages = messages[-20:]
+    ok = sb_patch("conversaciones", {"usuario_id": f"eq.{usuario_id}"}, {"messages": messages, "actualizado": "now()"})
+    if not ok:
+        sb_post("conversaciones", {"usuario_id": usuario_id, "messages": messages})
+
+
+def clear_history(usuario_id: int):
+    sb_patch("conversaciones", {"usuario_id": f"eq.{usuario_id}"}, {"messages": [], "actualizado": "now()"})
+
+
+# ── Microsoft Graph helpers ───────────────────────────────────────────────────
+
+def get_ms_token() -> str:
+    if not CALENDAR_ENABLED:
+        return ""
+    try:
+        r = requests.post(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+            data={
+                "grant_type":    "refresh_token",
+                "client_id":     MS_CLIENT_ID,
+                "client_secret": MS_CLIENT_SECRET,
+                "refresh_token": MS_REFRESH_TOKEN,
+                "scope":         "Calendars.ReadWrite Mail.Read offline_access",
+            },
+            timeout=15,
+        )
+        return r.json().get("access_token", "")
+    except Exception as e:
+        logger.error(f"MS token error: {e}")
+        return ""
+
+
+def block_calendar_slot(subject: str, start_dt: str, end_dt: str, attendee_email: str = None) -> str:
+    """Crea evento en el calendario de Julián via Microsoft Graph."""
+    if not CALENDAR_ENABLED:
+        return "⚠️ Calendario no configurado aún. Agrega MS_CLIENT_ID, MS_CLIENT_SECRET y MS_REFRESH_TOKEN en Railway."
+
+    token = get_ms_token()
+    if not token:
+        return "❌ No pude autenticar con Microsoft. Verifica las variables MS_* en Railway."
+
+    body = {
+        "subject": subject,
+        "start": {"dateTime": start_dt, "timeZone": "America/Panama"},
+        "end":   {"dateTime": end_dt,   "timeZone": "America/Panama"},
+    }
+    if attendee_email:
+        body["attendees"] = [{"emailAddress": {"address": attendee_email}, "type": "required"}]
+
+    r = requests.post(
+        "https://graph.microsoft.com/v1.0/me/events",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json=body,
+        timeout=15,
+    )
+
+    if r.status_code == 201:
+        fecha = start_dt[:10]
+        hora_i = start_dt[11:16]
+        hora_f = end_dt[11:16]
+        return f"✅ Bloqueado en calendario: '{subject}' — {fecha} {hora_i}–{hora_f}"
+    else:
+        logger.error(f"Graph calendar error: {r.status_code} {r.text[:300]}")
+        return f"❌ Error al crear evento: {r.status_code}"
+
+
+def notify_julian(mensaje: str) -> str:
+    """Envía mensaje proactivo a Julián via Telegram Bot API."""
+    if not ADMIN_TELEGRAM_ID:
+        return "No hay admin configurado."
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": ADMIN_TELEGRAM_ID, "text": f"📬 *Notificación de Dona:*\n\n{mensaje}", "parse_mode": "Markdown"},
+            timeout=10,
+        )
+        return "✅ Notificación enviada a Julián." if r.status_code == 200 else "❌ No pude notificar."
+    except Exception as e:
+        return f"❌ Error: {e}"
+
+
+# ── FDV tools ─────────────────────────────────────────────────────────────────
+
+def fdv_canal() -> str:
+    rows = sb_get("canal_metrics", {"order": "cohort.desc", "limit": "1"})
+    if not rows:
+        return "No hay datos del canal."
+    r = rows[0]
+    return f"Canal FDV — Cohort {r['cohort']} ({r['fecha']})\nRGU promedio: {r['rgu_prom']} | Ausentismo: {r['aus_pct']}% | Gerentes: {r['n_gerentes']}"
+
+
+def fdv_gerentes(solo_gerente: str = None) -> str:
+    rows = sb_get("gerentes", {"order": "ranking"})
+    if not rows:
+        return "No hay datos de gerentes."
+    if solo_gerente:
+        # Para gerentes: muestra su posición y el promedio del canal, no datos de otros
+        mi_fila = next((r for r in rows if solo_gerente.lower() in r["nombre"].lower()), None)
+        if not mi_fila:
+            return "No encontré tu registro."
+        return (
+            f"Tu posición: #{mi_fila['ranking']} de {len(rows)}\n"
+            f"RGU C9: {mi_fila['rgu_c9']} | Aus: {mi_fila['aus_pct']}% | SM: {mi_fila['sin_motivo']} | {mi_fila['accion']}"
+        )
+    # Admin: tabla completa
+    lines = ["Ranking Gerentes:"]
+    for r in rows:
+        lines.append(f"{r['ranking']}. {r['nombre']} | RGU C9: {r['rgu_c9']} | Aus: {r['aus_pct']}% | SM: {r['sin_motivo']} | {r['accion']}")
+    return "\n".join(lines)
+
+
+def fdv_supervisores(gerente: str = None) -> str:
+    params = {"order": "ranking_canal"}
+    if gerente:
+        params["gerente"] = f"ilike.*{gerente}*"
+    rows = sb_get("supervisores", params)
+    if not rows:
+        return "No hay datos de supervisores."
+    header = f"Supervisores de {gerente}:" if gerente else "Supervisores (canal):"
+    lines = [header]
+    for r in rows:
+        q = f"{r.get('quartil_c7','?')}→{r.get('quartil_c8','?')}→{r.get('quartil_c9','?')}"
+        lines.append(f"#{r['ranking_canal']} {r['nombre']} | RGU:{r['rgu_c9']} | Q:{q} | Aus:{r['aus_pct']}% | {r['accion']}")
+    return "\n".join(lines)
+
+
+def fdv_vendedores(supervisor: str = None, gerente: str = None) -> str:
+    params = {"order": "ranking_canal"}
+    if supervisor:
+        params["supervisor"] = f"ilike.*{supervisor}*"
+    elif gerente:
+        params["gerente"] = f"ilike.*{gerente}*"
+    rows = sb_get("vendedores", params)
+    if not rows:
+        return "No hay datos de vendedores."
+    label = supervisor or gerente or "canal completo"
+    lines = [f"Vendedores ({label}):"]
+    for r in rows:
+        q = f"{r.get('quartil_c7','?')}→{r.get('quartil_c8','?')}→{r.get('quartil_c9','?')}"
+        lines.append(f"#{r['ranking_canal']} {r['nombre']} | RGU:{r['rgu_actual']} | Q:{q} | {r['supervisor']}")
+    return "\n".join(lines)
 
 
 # ── Notion helpers ────────────────────────────────────────────────────────────
 
 def notion_request(method: str, path: str, data: dict = None) -> dict:
     url = f"https://api.notion.com/v1{path}"
-    headers = {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
-    }
+    headers = {"Authorization": f"Bearer {NOTION_TOKEN}", "Content-Type": "application/json", "Notion-Version": "2022-06-28"}
     try:
-        resp = requests.request(method, url, headers=headers, json=data, timeout=10)
-        logger.info(f"Notion response: {resp.status_code} {resp.text[:200]}")
-        return resp.json()
+        r = requests.request(method, url, headers=headers, json=data, timeout=10)
+        return r.json()
     except Exception as e:
-        logger.error(f"Notion API error: {e}")
+        logger.error(f"Notion: {e}")
         return {}
 
 
 def add_notion_task(task: str) -> bool:
-    data = {
-        "parent": {"database_id": NOTION_DATABASE_ID},
-        "properties": {
-            "Nombre": {
-                "title": [{"text": {"content": task}}]
-            }
-        }
-    }
-    result = notion_request("POST", "/pages", data)
-    return bool(result.get("id"))
+    data = {"parent": {"database_id": NOTION_DATABASE_ID}, "properties": {"Nombre": {"title": [{"text": {"content": task}}]}}}
+    return bool(notion_request("POST", "/pages", data).get("id"))
 
 
 def get_notion_tasks() -> list[str]:
     result = notion_request("POST", f"/databases/{NOTION_DATABASE_ID}/query", {})
     tasks = []
     for page in result.get("results", []):
-        title_prop = page.get("properties", {}).get("Nombre", {}).get("title", [])
-        if title_prop:
-            tasks.append(title_prop[0]["text"]["content"])
+        t = page.get("properties", {}).get("Nombre", {}).get("title", [])
+        if t:
+            tasks.append(t[0]["text"]["content"])
     return tasks
 
 
-# ── Tool definitions for Claude ───────────────────────────────────────────────
+# ── Tool definitions por rol ──────────────────────────────────────────────────
 
-TOOLS = [
-    {
-        "name": "add_task",
-        "description": "Guarda una tarea o pendiente en Notion. Úsala cuando Julián pida anotar, guardar o recordar algo.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task": {"type": "string", "description": "La tarea o pendiente a guardar"}
-            },
-            "required": ["task"]
-        }
-    },
-    {
-        "name": "list_tasks",
-        "description": "Lista las tareas pendientes de Notion. Úsala cuando Julián pregunte qué tiene pendiente.",
-        "input_schema": {
-            "type": "object",
-            "properties": {}
-        }
-    }
-]
+_TOOL_QUERY_CANAL = {
+    "name": "query_canal",
+    "description": "Estadísticas generales del canal FDV (RGU promedio, ausentismo, cohort).",
+    "input_schema": {"type": "object", "properties": {}},
+}
+_TOOL_QUERY_GERENTES = {
+    "name": "query_gerentes",
+    "description": "Ranking de gerentes con métricas. Para gerentes, pasa su propio nombre en 'solo_gerente' para ver solo su posición.",
+    "input_schema": {"type": "object", "properties": {
+        "solo_gerente": {"type": "string", "description": "Nombre del gerente para ver solo su posición (opcional)."},
+    }},
+}
+_TOOL_QUERY_SUPERVISORES = {
+    "name": "query_supervisores",
+    "description": "Supervisores con métricas. Filtra por gerente si se especifica.",
+    "input_schema": {"type": "object", "properties": {
+        "gerente": {"type": "string", "description": "Nombre parcial del gerente para filtrar (opcional)."},
+    }},
+}
+_TOOL_QUERY_VENDEDORES = {
+    "name": "query_vendedores",
+    "description": "Vendedores con métricas. Filtra por supervisor o gerente.",
+    "input_schema": {"type": "object", "properties": {
+        "supervisor": {"type": "string", "description": "Nombre parcial del supervisor (opcional)."},
+        "gerente":    {"type": "string", "description": "Nombre parcial del gerente (opcional)."},
+    }},
+}
+_TOOL_NOTIFY_JULIAN = {
+    "name": "notify_julian",
+    "description": "Envía una notificación a Julián por Telegram. Usar cuando el gerente solicita algo que requiere su aprobación (ej: reunión).",
+    "input_schema": {"type": "object", "properties": {
+        "mensaje": {"type": "string", "description": "Mensaje para Julián (incluye nombre del gerente, qué pide y posible horario)."},
+    }, "required": ["mensaje"]},
+}
+_TOOL_ADD_TASK = {
+    "name": "add_task",
+    "description": "Guarda una tarea/pendiente en Notion de Julián.",
+    "input_schema": {"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
+}
+_TOOL_LIST_TASKS = {
+    "name": "list_tasks",
+    "description": "Lista tareas pendientes de Notion de Julián.",
+    "input_schema": {"type": "object", "properties": {}},
+}
+_TOOL_BLOCK_AGENDA = {
+    "name": "block_agenda_slot",
+    "description": "Bloquea un espacio en el calendario de Julián. SOLO usar cuando Julián confirme explícitamente.",
+    "input_schema": {"type": "object", "properties": {
+        "subject":        {"type": "string", "description": "Título del evento."},
+        "start_dt":       {"type": "string", "description": "Fecha y hora inicio ISO: 2026-06-23T10:00:00"},
+        "end_dt":         {"type": "string", "description": "Fecha y hora fin ISO: 2026-06-23T11:00:00"},
+        "attendee_email": {"type": "string", "description": "Email del asistente (opcional)."},
+    }, "required": ["subject", "start_dt", "end_dt"]},
+}
+
+# Herramientas por rol
+TOOLS_ADMIN   = [_TOOL_ADD_TASK, _TOOL_LIST_TASKS, _TOOL_QUERY_CANAL, _TOOL_QUERY_GERENTES, _TOOL_QUERY_SUPERVISORES, _TOOL_QUERY_VENDEDORES, _TOOL_BLOCK_AGENDA]
+TOOLS_GERENTE = [_TOOL_QUERY_CANAL, _TOOL_QUERY_GERENTES, _TOOL_QUERY_SUPERVISORES, _TOOL_QUERY_VENDEDORES, _TOOL_NOTIFY_JULIAN]
 
 
-def handle_tool_call(tool_name: str, tool_input: dict) -> str:
-    if tool_name == "add_task":
-        task = tool_input.get("task", "")
-        success = add_notion_task(task)
-        if success:
-            return f"✅ Guardado en Notion: '{task}'"
-        else:
-            return "❌ No pude guardar la tarea en Notion."
-    elif tool_name == "list_tasks":
+def get_tools_for_role(rol: str) -> list:
+    return TOOLS_ADMIN if rol == "admin" else TOOLS_GERENTE
+
+
+def handle_tool_call(name: str, inp: dict, usuario: dict) -> str:
+    rol          = usuario.get("rol", "viewer")
+    gerente_ref  = usuario.get("gerente_ref")
+
+    if name == "add_task":
+        if rol != "admin":
+            return "No tienes acceso a esta función."
+        task = inp.get("task", "")
+        return f"✅ Guardado: '{task}'" if add_notion_task(task) else "❌ Error en Notion."
+
+    if name == "list_tasks":
+        if rol != "admin":
+            return "No tienes acceso a esta función."
         tasks = get_notion_tasks()
-        if not tasks:
-            return "No tienes tareas pendientes en Notion."
-        return "📋 Tus pendientes:\n" + "\n".join(f"• {t}" for t in tasks)
+        return "No hay pendientes." if not tasks else "📋 Pendientes:\n" + "\n".join(f"• {t}" for t in tasks)
+
+    if name == "query_canal":
+        return fdv_canal()
+
+    if name == "query_gerentes":
+        # Gerentes solo ven su posición, admin ve todo
+        solo = inp.get("solo_gerente") or (gerente_ref if rol == "gerente" else None)
+        return fdv_gerentes(solo_gerente=solo)
+
+    if name == "query_supervisores":
+        filtro = inp.get("gerente")
+        # Gerentes solo pueden ver su propio equipo
+        if rol == "gerente" and gerente_ref:
+            filtro = gerente_ref
+        return fdv_supervisores(gerente=filtro)
+
+    if name == "query_vendedores":
+        sup     = inp.get("supervisor")
+        gerente = inp.get("gerente")
+        # Gerentes solo ven su equipo
+        if rol == "gerente" and gerente_ref:
+            gerente = gerente_ref
+            sup = None
+        return fdv_vendedores(supervisor=sup, gerente=gerente)
+
+    if name == "block_agenda_slot":
+        if rol != "admin":
+            return "Solo Julián puede bloquear su calendario."
+        return block_calendar_slot(inp["subject"], inp["start_dt"], inp["end_dt"], inp.get("attendee_email"))
+
+    if name == "notify_julian":
+        return notify_julian(inp.get("mensaje", ""))
+
     return "Herramienta no reconocida."
 
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
+# ── Core: process_message (agnóstico de plataforma) ───────────────────────────
 
-def is_allowed(user_id: int) -> bool:
-    return ALLOWED_USER_ID == 0 or user_id == ALLOWED_USER_ID
+def process_message(user_text: str, usuario: dict) -> str:
+    usuario_id = usuario.get("id")
+    if not usuario_id:
+        return "Error: usuario no registrado en Supabase."
+
+    rol     = usuario.get("rol", "viewer")
+    history = get_history(usuario_id)
+    history.append({"role": "user", "content": user_text})
+
+    system = SYSTEM_ADMIN if rol == "admin" else SYSTEM_GERENTE
+    if rol == "gerente" and usuario.get("gerente_ref"):
+        system += f"\n\nNOMBRE DEL GERENTE: {usuario['gerente_ref']}"
+
+    tools = get_tools_for_role(rol)
+
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            system=system,
+            tools=tools,
+            messages=history,
+        )
+
+        if response.stop_reason == "tool_use":
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    result = handle_tool_call(block.name, block.input, usuario)
+                    tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
+
+            history.append({"role": "assistant", "content": response.content})
+            history.append({"role": "user", "content": tool_results})
+
+            final = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=512,
+                system=system,
+                tools=tools,
+                messages=history,
+            )
+            reply = final.content[0].text
+            history.append({"role": "assistant", "content": reply})
+        else:
+            reply = response.content[0].text
+            history.append({"role": "assistant", "content": reply})
+
+        save_history(usuario_id, history)
+        return reply
+
+    except Exception as e:
+        logger.error(f"Error Claude: {e}")
+        return "Hubo un error. Intenta de nuevo."
 
 
-# ── Handlers ──────────────────────────────────────────────────────────────────
+# ── Telegram handlers ─────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
+    usuario = get_or_create_user(str(update.effective_user.id))
+    if usuario.get("rol") == "viewer":
+        await update.message.reply_text("No tienes acceso a Dona. Contacta a Julián.")
         return
-    histories[update.effective_user.id] = []
+    if usuario.get("id"):
+        clear_history(usuario["id"])
+    nombre = update.effective_user.first_name or "hola"
     await update.message.reply_text(
-        "Hola Julián 👋 Soy tu asistente. ¿En qué te ayudo?\n\n"
-        "/clear — limpiar historial\n"
-        "/pendientes — ver tareas en Notion"
+        f"Hola {nombre} 👋 Soy Dona. ¿En qué te ayudo?\n\n/clear — limpiar historial\n/pendientes — ver tareas"
     )
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
-        return
-    histories[update.effective_user.id] = []
-    await update.message.reply_text("Historial limpiado. ¿En qué te ayudo?")
+    usuario = get_or_create_user(str(update.effective_user.id))
+    if usuario.get("id"):
+        clear_history(usuario["id"])
+    await update.message.reply_text("Historial limpiado.")
 
 
 async def cmd_pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
+    usuario = get_or_create_user(str(update.effective_user.id))
+    if usuario.get("rol") != "admin":
+        await update.message.reply_text("Solo Julián puede ver los pendientes.")
         return
     tasks = get_notion_tasks()
-    if not tasks:
-        await update.message.reply_text("No tienes tareas pendientes en Notion.")
-    else:
-        text = "📋 *Tus pendientes:*\n" + "\n".join(f"• {t}" for t in tasks)
-        await update.message.reply_text(text, parse_mode="Markdown")
+    text = "No hay pendientes." if not tasks else "📋 *Pendientes:*\n" + "\n".join(f"• {t}" for t in tasks)
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_allowed(user_id):
+    platform_id = str(update.effective_user.id)
+    usuario = get_or_create_user(platform_id)
+
+    if usuario.get("rol") == "viewer":
+        await update.message.reply_text("No tienes acceso a Dona.")
         return
 
-    user_text = update.message.text
-    if user_id not in histories:
-        histories[user_id] = []
-
-    histories[user_id].append({"role": "user", "content": user_text})
-
-    if len(histories[user_id]) > 20:
-        histories[user_id] = histories[user_id][-20:]
-
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1024,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
-            messages=histories[user_id],
-        )
-
-        # Handle tool use
-        if response.stop_reason == "tool_use":
-            tool_results = []
-            reply_parts = []
-
-            for block in response.content:
-                if block.type == "tool_use":
-                    result_text = handle_tool_call(block.name, block.input)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result_text
-                    })
-                    reply_parts.append(result_text)
-
-            # Add assistant response and tool results to history
-            histories[user_id].append({"role": "assistant", "content": response.content})
-            histories[user_id].append({"role": "user", "content": tool_results})
-
-            # Get final response from Claude after tool execution
-            final_response = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=512,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=histories[user_id],
-            )
-            reply = final_response.content[0].text
-            histories[user_id].append({"role": "assistant", "content": reply})
-
-        else:
-            reply = response.content[0].text
-            histories[user_id].append({"role": "assistant", "content": reply})
-
-        await update.message.reply_text(reply)
-
-    except Exception as e:
-        logger.error(f"Error Claude API: {e}")
-        await update.message.reply_text(
-            "Hubo un error al procesar tu mensaje. Intenta de nuevo."
-        )
+    reply = process_message(update.message.text, usuario)
+    await update.message.reply_text(reply)
 
 
 def main():
+    cal_status = "✅ Calendario activo" if CALENDAR_ENABLED else "⚠️  Calendario desactivado (faltan vars MS_*)"
+    logger.info(f"Dona v2 iniciando... {cal_status}")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("pendientes", cmd_pendientes))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("Bot corriendo...")
     app.run_polling(drop_pending_updates=True)
 
 
