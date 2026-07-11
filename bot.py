@@ -557,7 +557,7 @@ def fetch_inbox(hours: int = 18) -> list | None:
     desde = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
     params = {
         "$filter": f"receivedDateTime ge {desde}",
-        "$select": "subject,from,toRecipients,ccRecipients,bodyPreview,importance,receivedDateTime,isRead,conversationId",
+        "$select": "subject,from,toRecipients,ccRecipients,body,bodyPreview,importance,receivedDateTime,isRead,conversationId",
         "$orderby": "receivedDateTime desc",
         "$top": "50",
     }
@@ -574,13 +574,17 @@ def fetch_inbox(hours: int = 18) -> list | None:
         msgs = []
         for m in r.json().get("value", []):
             frm = (m.get("from") or {}).get("emailAddress", {})
+            # Cuerpo completo en texto (Prefer: outlook.body-content-type="text").
+            # Colapsa espacios/saltos para ahorrar tokens y recorta a 2000 chars.
+            cuerpo_raw = (m.get("body") or {}).get("content", "") or m.get("bodyPreview", "") or ""
+            cuerpo = " ".join(cuerpo_raw.split())[:2000]
             msgs.append({
                 "asunto":     m.get("subject", "(sin asunto)"),
                 "de_nombre":  frm.get("name", ""),
                 "de_email":   frm.get("address", ""),
                 "para":       [t.get("emailAddress", {}).get("address", "") for t in m.get("toRecipients", [])],
                 "cc":         [t.get("emailAddress", {}).get("address", "") for t in m.get("ccRecipients", [])],
-                "preview":    (m.get("bodyPreview", "") or "")[:600],
+                "cuerpo":     cuerpo,
                 "importancia": m.get("importance", "normal"),
                 "recibido":   m.get("receivedDateTime", ""),
                 "leido":      m.get("isRead", False),
