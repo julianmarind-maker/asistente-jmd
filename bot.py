@@ -12,10 +12,15 @@ Variables opcionales (habilitan calendario — agregar en Fase B):
 
 import os
 import json
+import html as _html
 import logging
 import requests
+from datetime import datetime, timedelta, timezone, time as dtime
+from zoneinfo import ZoneInfo
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters, ContextTypes
+)
 import anthropic
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -32,6 +37,10 @@ MS_CLIENT_ID     = os.environ.get("MS_CLIENT_ID", "")
 MS_CLIENT_SECRET = os.environ.get("MS_CLIENT_SECRET", "")
 MS_REFRESH_TOKEN = os.environ.get("MS_REFRESH_TOKEN", "")
 CALENDAR_ENABLED = bool(MS_CLIENT_ID and MS_CLIENT_SECRET and MS_REFRESH_TOKEN)
+
+# Triaje de correo — reutiliza el mismo token de Graph (Mail.Read ya incluido en scope)
+TRIAJE_MODEL = os.environ.get("TRIAJE_MODEL", "claude-haiku-4-5-20251001")
+TZ_PANAMA    = ZoneInfo("America/Panama")
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
@@ -534,6 +543,247 @@ def process_message(user_text: str, usuario: dict) -> str:
         return "Hubo un error. Intenta de nuevo."
 
 
+# ── Triaje de bandeja + borradores ────────────────────────────────────────────
+
+def fetch_inbox(hours: int = 18) -> list | None:
+    """Lee los correos recibidos en las últimas `hours` horas via Microsoft Graph.
+    Devuelve lista de dicts, o None si Graph no está configurado / falla la auth."""
+    if not CALENDAR_ENABLED:
+        return None
+    token = get_ms_token()
+    if not token:
+        return None
+
+    desde = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    params = {
+        "$filter": f"receivedDateTime ge {desde}",
+        "$select": "subject,from,toRecipients,ccRecipients,bodyPreview,importance,receivedDateTime,isRead,conversationId",
+        "$orderby": "receivedDateTime desc",
+        "$top": "50",
+    }
+    try:
+        r = requests.get(
+            "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages",
+            headers={"Authorization": f"Bearer {token}", "Prefer": 'outlook.body-content-type="text"'},
+            params=params,
+            timeout=20,
+        )
+        if r.status_code != 200:
+            logger.error(f"Graph inbox error: {r.status_code} {r.text[:300]}")
+            return None
+        msgs = []
+        for m in r.json().get("value", []):
+            frm = (m.get("from") or {}).get("emailAddress", {})
+            msgs.append({
+                "asunto":     m.get("subject", "(sin asunto)"),
+                "de_nombre":  frm.get("name", ""),
+                "de_email":   frm.get("address", ""),
+                "para":       [t.get("emailAddress", {}).get("address", "") for t in m.get("toRecipients", [])],
+                "cc":         [t.get("emailAddress", {}).get("address", "") for t in m.get("ccRecipients", [])],
+                "preview":    (m.get("bodyPreview", "") or "")[:600],
+                "importancia": m.get("importance", "normal"),
+                "recibido":   m.get("receivedDateTime", ""),
+                "leido":      m.get("isRead", False),
+            })
+        return msgs
+    except Exception as e:
+        logger.error(f"fetch_inbox exception: {e}")
+        return None
+
+
+TRIAJE_SYSTEM = """Eres Dona, la jefa de gabinete de Julián Marín, Director de Venta Directa en CWP Panamá.
+Tu tarea: triar la bandeja de entrada de Julián y REDACTAR BORRADORES de respuesta listos para copiar/pegar en Outlook.
+
+CONTEXTO DE JULIÁN:
+- Director de Venta Directa (FDV). Reporta a la Vicepresidencia (VP) — protege sus buffers para la VP.
+- Contratistas operativos clave: Dinamo, Cellca, V&G, Salesland. Problemas de ellos = operativo, suele requerir respuesta.
+- Tono de Julián al escribir: directo, cordial, ejecutivo, español de Panamá. Sin rodeos ni relleno. Nunca servil.
+
+CÓMO CLASIFICAR CADA CORREO EN 3 GRUPOS:
+1. "requieren_respuesta" — Julián debe contestar. Prioridad:
+   🔴 alta: viene de la VP/LLA, o de un jefe; problema operativo urgente de un contratista; algo que bloquea a otros; deadline < 24h; palabras como "urgente", "hoy", "aprobar", "pendiente tuyo".
+   🟡 media: pide info o decisión pero sin urgencia inmediata.
+   🟢 baja: cortesía, confirmar asistencia, responder gracias.
+   Para CADA uno redacta un "borrador" completo (saludo + cuerpo + cierre), en la voz de Julián, listo para enviar. Si falta info para responder bien, deja un [placeholder] claro en el borrador.
+2. "leer" — informativo, Julián debería leerlo pero no responder (reportes, FYI, newsletters relevantes). Solo asunto + remitente + una línea de por qué.
+3. "ruido" — promociones, notificaciones automáticas, spam, cc masivos sin acción. Solo cuéntalos.
+
+ALERTA — HILO CRÍTICO:
+Si algún correo pertenece al hilo "Aparición agentes genéricos en ventas" o menciona "sales_rep_name" / agentes genéricos, clasifícalo SIEMPRE como 🔴 alta, sin importar el remitente, y en "por_que" escribe "⚠️ HILO CRÍTICO marcado por Julián".
+
+REGLA CC: si Julián solo está en CC y no lo interpelan directamente, tiende a "leer" o "ruido", no a "requieren_respuesta" — salvo que sea la VP o el hilo crítico.
+
+Responde SOLO con un objeto JSON válido, sin texto adicional, con esta forma exacta:
+{
+  "requieren_respuesta": [
+    {"remitente": "Nombre <email>", "asunto": "...", "prioridad": "alta|media|baja", "por_que": "1 línea", "borrador": "texto completo del correo de respuesta"}
+  ],
+  "leer": [
+    {"remitente": "Nombre <email>", "asunto": "...", "por_que": "1 línea"}
+  ],
+  "ruido_count": 0,
+  "nota": "1 línea opcional con tu lectura del día, o vacío"
+}"""
+
+
+def run_triaje(hours: int = 18) -> dict:
+    """Corre el triaje. Devuelve dict con clave especial _estado:
+    'sin_graph' | 'sin_correos' | 'error' | 'ok'."""
+    msgs = fetch_inbox(hours)
+    if msgs is None:
+        return {"_estado": "sin_graph"}
+    if not msgs:
+        return {"_estado": "sin_correos"}
+
+    payload = json.dumps(msgs, ensure_ascii=False)
+    user_prompt = (
+        f"Estos son los {len(msgs)} correos recibidos en las últimas {hours} horas. "
+        f"Tríalos y redacta los borradores."
+        f"\n\nCORREOS (JSON):\n{payload}"
+    )
+    try:
+        resp = client.messages.create(
+            model=TRIAJE_MODEL,
+            max_tokens=4096,
+            system=TRIAJE_SYSTEM,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        raw = resp.content[0].text.strip()
+        # Limpiar posibles fences ```json
+        if raw.startswith("```"):
+            raw = raw.split("```", 2)[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+        data = json.loads(raw)
+        data["_estado"] = "ok"
+        data["_total"] = len(msgs)
+        return data
+    except Exception as e:
+        logger.error(f"run_triaje error: {e}")
+        return {"_estado": "error"}
+
+
+EMOJI_PRIORIDAD = {"alta": "🔴", "media": "🟡", "baja": "🟢"}
+ORDEN_PRIORIDAD = {"alta": 0, "media": 1, "baja": 2}
+LIMITE_TG = 3800  # margen bajo el límite de 4096 de Telegram
+
+
+def _bloque_correo(i: int, e: dict) -> str:
+    """Texto HTML de un correo 'por responder', con el borrador en <pre> para copiar."""
+    em = EMOJI_PRIORIDAD.get(e.get("prioridad", "media"), "🟡")
+    borrador = e.get("borrador", "")
+    truncado = ""
+    if len(borrador) > 3200:  # deja aire para el resto del mensaje
+        borrador = borrador[:3200]
+        truncado = "\n… (borrador recortado; pídeme «ajusta el borrador N» para verlo completo)"
+    return (
+        f"{em} <b>{i}. {_html.escape(e.get('asunto','(sin asunto)'))}</b>\n"
+        f"De: {_html.escape(e.get('remitente',''))}\n"
+        f"<i>{_html.escape(e.get('por_que',''))}</i>\n"
+        f"Borrador:\n<pre>{_html.escape(borrador)}</pre>{_html.escape(truncado)}"
+    )
+
+
+async def _send_triaje(context: ContextTypes.DEFAULT_TYPE, chat_id: int, hours: int, etiqueta: str):
+    """Corre el triaje y lo entrega por Telegram: un mensaje de resumen, luego un mensaje
+    por cada correo 'por responder' con su borrador en texto para copiar, y finalmente 'para leer'."""
+    bot = context.bot
+    data = run_triaje(hours)
+    estado = data.get("_estado")
+
+    if estado == "sin_graph":
+        await bot.send_message(chat_id=chat_id, text=(
+            "⚠️ El triaje de correo necesita acceso a tu bandeja (Microsoft Graph). "
+            "Faltan las variables MS_* en Railway o el token no autoriza Mail.Read."))
+        return
+    if estado == "sin_correos":
+        await bot.send_message(chat_id=chat_id, parse_mode="HTML",
+            text=f"📭 <b>{_html.escape(etiqueta)}</b>\nNo hay correos nuevos en el período. Disfruta el silencio.")
+        return
+    if estado != "ok":
+        await bot.send_message(chat_id=chat_id,
+            text="❌ No pude completar el triaje (error al leer o clasificar). Intenta con /triaje en un momento.")
+        return
+
+    req   = sorted(data.get("requieren_respuesta", []) or [],
+                   key=lambda x: ORDEN_PRIORIDAD.get(x.get("prioridad", "media"), 1))
+    leer  = data.get("leer", []) or []
+    ruido = data.get("ruido_count", 0)
+    nota  = (data.get("nota") or "").strip()
+    total = data.get("_total", "?")
+
+    # 1) Resumen
+    header = [f"📬 <b>{_html.escape(etiqueta)}</b> — {total} correos revisados",
+              f"✍️ {len(req)} por responder · 👀 {len(leer)} para leer · 🔕 {ruido} ruido"]
+    if nota:
+        header.append(f"\n<i>{_html.escape(nota)}</i>")
+    await bot.send_message(chat_id=chat_id, text="\n".join(header), parse_mode="HTML")
+
+    # 2) Un mensaje por correo por responder, con el borrador en texto para copiar
+    for i, e in enumerate(req, 1):
+        try:
+            await bot.send_message(chat_id=chat_id, text=_bloque_correo(i, e), parse_mode="HTML")
+        except Exception as ex:
+            logger.error(f"Error enviando correo {i}: {ex}")
+            await bot.send_message(chat_id=chat_id,
+                text=f"{i}. {e.get('asunto','')}\n\n{e.get('borrador','')}")
+
+    # 3) Para leer (una sola tanda, partida si excede el límite)
+    if leer:
+        bloques = ["━━━━━━━━━━━━━━\n<b>PARA LEER</b>"]
+        for e in leer:
+            bloques.append(
+                f"• <b>{_html.escape(e.get('asunto','(sin asunto)'))}</b> — "
+                f"{_html.escape(e.get('remitente',''))}\n  <i>{_html.escape(e.get('por_que',''))}</i>")
+        texto = "\n".join(bloques)
+        buffer = ""
+        for linea in texto.split("\n"):
+            if len(buffer) + len(linea) + 1 > LIMITE_TG:
+                await bot.send_message(chat_id=chat_id, text=buffer, parse_mode="HTML")
+                buffer = linea
+            else:
+                buffer = f"{buffer}\n{linea}" if buffer else linea
+        if buffer:
+            await bot.send_message(chat_id=chat_id, text=buffer, parse_mode="HTML")
+
+    await bot.send_message(chat_id=chat_id,
+        text="💬 Copia el borrador que te sirva, o dime «ajusta el borrador 2, más corto» y lo reescribo.")
+
+    # 4) Guardar en historial del admin para permitir «ajusta el borrador N»
+    if req:
+        usuario = get_or_create_user(str(chat_id))
+        if usuario.get("id"):
+            hist = get_history(usuario["id"])
+            resumen = "\n\n".join(
+                f"[{e.get('prioridad','media')}] {e.get('asunto','')} — {e.get('remitente','')}\n{e.get('borrador','')}"
+                for e in req)
+            hist.append({"role": "user", "content": f"[TRIAJE {etiqueta}] Correos por responder:"})
+            hist.append({"role": "assistant", "content": f"Estos son los borradores que preparé:\n\n{resumen}"})
+            save_history(usuario["id"], hist)
+
+
+async def job_triaje_manana(context: ContextTypes.DEFAULT_TYPE):
+    """7:30am — mira las últimas 18h (cubre la noche anterior)."""
+    if ADMIN_TELEGRAM_ID:
+        await _send_triaje(context, ADMIN_TELEGRAM_ID, 18, "Triaje matutino")
+
+
+async def job_triaje_tarde(context: ContextTypes.DEFAULT_TYPE):
+    """1:30pm — mira las últimas 6h (mañana de trabajo)."""
+    if ADMIN_TELEGRAM_ID:
+        await _send_triaje(context, ADMIN_TELEGRAM_ID, 6, "Triaje del mediodía")
+
+
+async def cmd_triaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    usuario = get_or_create_user(str(update.effective_user.id))
+    if usuario.get("rol") != "admin":
+        await update.message.reply_text("Solo Julián puede correr el triaje.")
+        return
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    await _send_triaje(context, update.effective_chat.id, 24, "Triaje manual (24h)")
+
+
 # ── Telegram handlers ─────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -545,7 +795,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_history(usuario["id"])
     nombre = update.effective_user.first_name or "hola"
     await update.message.reply_text(
-        f"Hola {nombre} 👋 Soy Dona. ¿En qué te ayudo?\n\n/clear — limpiar historial\n/pendientes — ver tareas"
+        f"Hola {nombre} 👋 Soy Dona. ¿En qué te ayudo?\n\n"
+        "/triaje — revisar bandeja y preparar borradores\n"
+        "/pendientes — ver tareas\n"
+        "/clear — limpiar historial"
     )
 
 
@@ -586,7 +839,17 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("pendientes", cmd_pendientes))
+    app.add_handler(CommandHandler("triaje", cmd_triaje))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Triaje automático (requiere python-telegram-bot[job-queue])
+    if app.job_queue is not None and ADMIN_TELEGRAM_ID:
+        app.job_queue.run_daily(job_triaje_manana, time=dtime(7, 30, tzinfo=TZ_PANAMA), name="triaje_manana")
+        app.job_queue.run_daily(job_triaje_tarde,  time=dtime(13, 30, tzinfo=TZ_PANAMA), name="triaje_tarde")
+        logger.info("Triaje programado: 7:30am y 1:30pm (America/Panama)")
+    else:
+        logger.warning("JobQueue no disponible o sin ADMIN_TELEGRAM_ID — triaje automático desactivado (usa /triaje manual)")
+
     app.run_polling(drop_pending_updates=True)
 
 
